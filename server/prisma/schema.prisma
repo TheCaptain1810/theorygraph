@@ -1,0 +1,231 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum InterpretationType {
+  interpretation
+  fan_theory
+  production_fact
+  question
+}
+
+enum SpoilerLevel {
+  none
+  minor
+  major
+}
+
+enum ContentStatus {
+  published
+  hidden
+  removed
+}
+
+enum EvidenceType {
+  observation
+  external_source
+  production_fact
+}
+
+enum TagCategory {
+  motif
+  cinematography
+  editing
+  sound
+  narrative
+  theme
+  genre
+  other
+}
+
+enum UserRole {
+  user
+  moderator
+  admin
+}
+
+enum ReportTargetType {
+  interpretation
+  counter_reading
+}
+
+enum ReportReason {
+  abuse
+  plagiarism
+  spam
+  misinformation
+  copyright
+  spoiler
+  other
+}
+
+enum ReportStatus {
+  open
+  dismissed
+  actioned
+}
+
+enum ModerationActionType {
+  dismiss
+  hide
+  remove
+  restore
+}
+
+model User {
+  id              String           @id @db.Uuid
+  username        String           @unique
+  displayName     String?          @map("display_name")
+  bio             String?
+  role            UserRole         @default(user)
+  createdAt       DateTime         @default(now()) @map("created_at")
+  updatedAt       DateTime         @updatedAt @map("updated_at")
+  interpretations Interpretation[]
+  counterReadings CounterReading[]
+  reports         Report[]
+  moderationLog   ModerationAction[]
+
+  @@map("users")
+}
+
+model Film {
+  id                  String           @id @default(uuid(7)) @db.Uuid
+  provider            String
+  providerFilmId      String           @map("provider_film_id")
+  title               String
+  releaseYear         Int?             @map("release_year")
+  director            String?
+  posterPath          String?          @map("poster_path")
+  metadataAttribution String?          @map("metadata_attribution")
+  createdAt           DateTime         @default(now()) @map("created_at")
+  interpretations     Interpretation[]
+
+  @@unique([provider, providerFilmId])
+  @@map("films")
+}
+
+model Interpretation {
+  id                 String             @id @default(uuid(7)) @db.Uuid
+  filmId             String             @map("film_id") @db.Uuid
+  authorId           String             @map("author_id") @db.Uuid
+  title              String
+  claim              String
+  interpretationType InterpretationType @map("interpretation_type")
+  spoilerLevel       SpoilerLevel       @map("spoiler_level")
+  status             ContentStatus      @default(published)
+  createdAt          DateTime           @default(now()) @map("created_at")
+  updatedAt          DateTime           @updatedAt @map("updated_at")
+
+  film            Film                @relation(fields: [filmId], references: [id])
+  author          User                @relation(fields: [authorId], references: [id])
+  evidence        Evidence[]
+  counterReadings CounterReading[]
+  tags            InterpretationTag[]
+
+  @@index([filmId, status, createdAt])
+  @@index([authorId])
+  @@map("interpretations")
+}
+
+model CounterReading {
+  id               String        @id @default(uuid(7)) @db.Uuid
+  interpretationId String        @map("interpretation_id") @db.Uuid
+  authorId         String        @map("author_id") @db.Uuid
+  body             String
+  status           ContentStatus @default(published)
+  createdAt        DateTime      @default(now()) @map("created_at")
+  updatedAt        DateTime      @updatedAt @map("updated_at")
+
+  interpretation Interpretation @relation(fields: [interpretationId], references: [id])
+  author         User           @relation(fields: [authorId], references: [id])
+  evidence       Evidence[]
+
+  @@index([interpretationId, status, createdAt])
+  @@map("counter_readings")
+}
+
+// DB CHECK constraints (exactly one parent; non-negative timestamp) live in the
+// hand-edited migration SQL because Prisma's schema language cannot express them.
+model Evidence {
+  id               String       @id @default(uuid(7)) @db.Uuid
+  interpretationId String?      @map("interpretation_id") @db.Uuid
+  counterReadingId String?      @map("counter_reading_id") @db.Uuid
+  sceneDescription String?      @map("scene_description")
+  timestampSeconds Int?         @map("timestamp_seconds")
+  evidenceType     EvidenceType @map("evidence_type")
+  description      String
+  sourceUrl        String?      @map("source_url")
+  createdAt        DateTime     @default(now()) @map("created_at")
+
+  interpretation Interpretation? @relation(fields: [interpretationId], references: [id], onDelete: Restrict)
+  counterReading CounterReading? @relation(fields: [counterReadingId], references: [id], onDelete: Restrict)
+
+  @@index([interpretationId])
+  @@index([counterReadingId])
+  @@map("evidence")
+}
+
+model Tag {
+  id              String              @id @default(uuid(7)) @db.Uuid
+  name            String              @unique
+  category        TagCategory         @default(other)
+  interpretations InterpretationTag[]
+
+  @@map("tags")
+}
+
+model InterpretationTag {
+  interpretationId String @map("interpretation_id") @db.Uuid
+  tagId            String @map("tag_id") @db.Uuid
+
+  interpretation Interpretation @relation(fields: [interpretationId], references: [id])
+  tag            Tag            @relation(fields: [tagId], references: [id])
+
+  @@id([interpretationId, tagId])
+  @@map("interpretation_tags")
+}
+
+// Polymorphic target (interpretation or counter_reading): validated in the application, not by FK.
+model Report {
+  id         String           @id @default(uuid(7)) @db.Uuid
+  reporterId String           @map("reporter_id") @db.Uuid
+  targetType ReportTargetType @map("target_type")
+  targetId   String           @map("target_id") @db.Uuid
+  reason     ReportReason
+  details    String?
+  status     ReportStatus     @default(open)
+  createdAt  DateTime         @default(now()) @map("created_at")
+  resolvedAt DateTime?        @map("resolved_at")
+
+  reporter User               @relation(fields: [reporterId], references: [id])
+  actions  ModerationAction[]
+
+  // One report per reporter per target; repeats are idempotent.
+  @@unique([reporterId, targetType, targetId])
+  @@index([status, createdAt])
+  @@index([targetType, targetId])
+  @@map("reports")
+}
+
+// Append-only audit trail of moderator decisions. Never stores secrets.
+model ModerationAction {
+  id          String               @id @default(uuid(7)) @db.Uuid
+  moderatorId String               @map("moderator_id") @db.Uuid
+  reportId    String?              @map("report_id") @db.Uuid
+  targetType  ReportTargetType     @map("target_type")
+  targetId    String               @map("target_id") @db.Uuid
+  action      ModerationActionType
+  note        String?
+  createdAt   DateTime             @default(now()) @map("created_at")
+
+  moderator User    @relation(fields: [moderatorId], references: [id])
+  report    Report? @relation(fields: [reportId], references: [id])
+
+  @@index([targetType, targetId])
+  @@map("moderation_actions")
+}
